@@ -1,3 +1,4 @@
+using FrontBlazor_AppiGenericaCsharp.Services;
 using FrontBlazor_AppiGenericaCsharp.Components;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,6 +14,7 @@ builder.Services.AddScoped(sp => new HttpClient
 {
     BaseAddress = new Uri(apiBaseUrl)
 });
+builder.Services.AddScoped<ApiService>();
 
 var app = builder.Build();
 

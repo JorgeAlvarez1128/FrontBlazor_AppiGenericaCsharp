@@ -7,7 +7,7 @@ namespace FrontBlazor_AppiGenericaCsharp.Services
     // Se inyecta en las paginas Blazor con @inject ApiService Api
     public class ApiService
     {
-        // HttpClient configurado en Program.cs con la URL base de la API
+    // HttpClient configurado en Program.cs con la URL base de la API
         private readonly HttpClient _http;
 
         // Opciones para deserializar JSON sin distinguir mayusculas/minusculas
@@ -31,13 +31,33 @@ namespace FrontBlazor_AppiGenericaCsharp.Services
         {
             try
             {
-                // Hace GET a la API y obtiene la respuesta como JSON
-                var respuesta = await _http.GetFromJsonAsync<JsonElement>($"/api/{tabla}", _jsonOptions);
+                                var respuesta = await _http.GetAsync($"/api/{tabla}");
+                                 if (!respuesta.IsSuccessStatusCode)
+                {
+                    return new List<Dictionary<string, object?>>();
+                }
 
-                // Extrae la propiedad "datos" de la respuesta
-                if (respuesta.TryGetProperty("datos", out JsonElement datos))
+                string cuerpo = await respuesta.Content.ReadAsStringAsync();
+                if (string.IsNullOrWhiteSpace(cuerpo))
+                {
+                    // Caso tipico: API responde 200/204 sin contenido cuando no hay datos
+                    return new List<Dictionary<string, object?>>();
+                }
+
+                if (!TryParseJson(cuerpo, out JsonElement json))
+                {
+                    return new List<Dictionary<string, object?>>();
+                }
+
+                // Soporta tanto { datos: [...] } como [...]
+                if (json.ValueKind == JsonValueKind.Object && json.TryGetProperty("datos", out JsonElement datos))
                 {
                     return ConvertirDatos(datos);
+                }
+
+                if (json.ValueKind == JsonValueKind.Array)
+                {
+                    return ConvertirDatos(json);
                 }
 
                 return new List<Dictionary<string, object?>>();
@@ -60,12 +80,7 @@ namespace FrontBlazor_AppiGenericaCsharp.Services
             try
             {
                 var respuesta = await _http.PostAsJsonAsync($"/api/{tabla}", datos);
-                var contenido = await respuesta.Content.ReadFromJsonAsync<JsonElement>(_jsonOptions);
-
-                string mensaje = contenido.TryGetProperty("mensaje", out JsonElement msg)
-                    ? msg.GetString() ?? "Operacion completada."
-                    : "Operacion completada.";
-
+                                string mensaje = await ObtenerMensajeAsync(respuesta);
                 return (respuesta.IsSuccessStatusCode, mensaje);
             }
             catch (HttpRequestException ex)
@@ -86,12 +101,7 @@ namespace FrontBlazor_AppiGenericaCsharp.Services
             {
                 var respuesta = await _http.PutAsJsonAsync(
                     $"/api/{tabla}/{nombreClave}/{valorClave}", datos);
-                var contenido = await respuesta.Content.ReadFromJsonAsync<JsonElement>(_jsonOptions);
-
-                string mensaje = contenido.TryGetProperty("mensaje", out JsonElement msg)
-                    ? msg.GetString() ?? "Operacion completada."
-                    : "Operacion completada.";
-
+                                    string mensaje = await ObtenerMensajeAsync(respuesta);
                 return (respuesta.IsSuccessStatusCode, mensaje);
             }
             catch (HttpRequestException ex)
@@ -111,12 +121,7 @@ namespace FrontBlazor_AppiGenericaCsharp.Services
             {
                 var respuesta = await _http.DeleteAsync(
                     $"/api/{tabla}/{nombreClave}/{valorClave}");
-                var contenido = await respuesta.Content.ReadFromJsonAsync<JsonElement>(_jsonOptions);
-
-                string mensaje = contenido.TryGetProperty("mensaje", out JsonElement msg)
-                    ? msg.GetString() ?? "Operacion completada."
-                    : "Operacion completada.";
-
+                                    string mensaje = await ObtenerMensajeAsync(respuesta);
                 return (respuesta.IsSuccessStatusCode, mensaje);
             }
             catch (HttpRequestException ex)
@@ -127,22 +132,28 @@ namespace FrontBlazor_AppiGenericaCsharp.Services
 
         // ──────────────────────────────────────────────
         // METODO AUXILIAR: Convierte JsonElement a lista de diccionarios
-        // La API devuelve los datos como JSON generico, este metodo
-        // lo transforma a Dictionary<string, object?> para trabajar
-        // facilmente con @foreach y @bind en Blazor
-        // ──────────────────────────────────────────────
+                // ──────────────────────────────────────────────
         private List<Dictionary<string, object?>> ConvertirDatos(JsonElement datos)
         {
             var lista = new List<Dictionary<string, object?>>();
 
+            if (datos.ValueKind != JsonValueKind.Array)
+            {
+                return lista;
+            }
+
             foreach (var fila in datos.EnumerateArray())
             {
+                if (fila.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
                 var diccionario = new Dictionary<string, object?>();
 
                 foreach (var propiedad in fila.EnumerateObject())
                 {
-                    // Convierte cada valor JSON a su tipo .NET correspondiente
-                    diccionario[propiedad.Name] = propiedad.Value.ValueKind switch
+                                        diccionario[propiedad.Name] = propiedad.Value.ValueKind switch
                     {
                         JsonValueKind.String => propiedad.Value.GetString(),
                         JsonValueKind.Number => propiedad.Value.TryGetInt32(out int i) ? i : propiedad.Value.GetDouble(),
@@ -157,6 +168,51 @@ namespace FrontBlazor_AppiGenericaCsharp.Services
             }
 
             return lista;
+        }
+
+        // ──────────────────────────────────────────────
+        // METODOS AUXILIARES: lectura segura de mensajes de API
+        // ──────────────────────────────────────────────
+        private async Task<string> ObtenerMensajeAsync(HttpResponseMessage respuesta)
+        {
+            string cuerpo = await respuesta.Content.ReadAsStringAsync();
+
+            if (string.IsNullOrWhiteSpace(cuerpo))
+            {
+                return respuesta.IsSuccessStatusCode
+                    ? "Operacion completada."
+                    : $"Error HTTP {(int)respuesta.StatusCode}.";
+            }
+
+            if (TryParseJson(cuerpo, out JsonElement json))
+            {
+                if (json.ValueKind == JsonValueKind.Object && json.TryGetProperty("mensaje", out JsonElement msg))
+                {
+                    return msg.GetString() ?? "Operacion completada.";
+                }
+
+                return respuesta.IsSuccessStatusCode
+                    ? "Operacion completada."
+                    : $"Error HTTP {(int)respuesta.StatusCode}.";
+            }
+
+            // Si no viene JSON, devolvemos texto plano para poder mostrarlo en UI
+            return cuerpo;
+        }
+
+        private bool TryParseJson(string contenido, out JsonElement json)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(contenido);
+                json = doc.RootElement.Clone();
+                return true;
+            }
+            catch (JsonException)
+            {
+                json = default;
+                return false;
+            }
         }
     }
 }
